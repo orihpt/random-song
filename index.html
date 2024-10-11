@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Random Song Redirect</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      padding: 50px;
+    }
+    #status {
+      font-size: 1.2em;
+      margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Redirecting to a Random Song...</h1>
+  <div id="status">Processing your request...</div>
+
+  <script>
+    (async () => {
+      // Utility function to get query parameters
+      function getQueryParams() {
+        const params = new URLSearchParams(window.location.search);
+        return {
+          artist: params.get('artist'),
+          country: params.get('country'),
+          platform: params.get('platform')
+        };
+      }
+
+      // Utility function to sanitize artist name for caching
+      function sanitizeArtistName(name) {
+        return name.replace(/[\/\\:*?"<>|;,]/g, '_').replace(/\s+/g, '_').toLowerCase();
+      }
+
+      // Function to display status messages
+      function updateStatus(message) {
+        document.getElementById('status').innerText = message;
+      }
+
+      // Function to get artist ID from iTunes API
+      async function getArtistID(artistName, country) {
+        const url = `https://itunes.apple.com/search?term=${encodeURIComponent(artistName)}&entity=allArtist&attribute=allArtistTerm&country=${country}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error('Failed to fetch artist data from iTunes API.');
+        }
+        const data = await response.json();
+        const results = data.results.filter(
+          result =>
+            result.artistName.toLowerCase() === artistName.toLowerCase() &&
+            result.artistType === 'Artist'
+        );
+        if (results.length === 0) {
+          throw new Error('Artist not found.');
+        }
+        return results[0].artistId.toString();
+      }
+
+      // Function to get songs list from iTunes API or cache
+      async function getSongsList(artistName, country) {
+        const cacheKey = `songs_${sanitizeArtistName(artistName)}_${country}`;
+        const cached = localStorage.getItem(cacheKey);
+        if (cached) {
+          updateStatus('Loaded songs from cache.');
+          return JSON.parse(cached);
+        }
+
+        updateStatus('Fetching artist information...');
+        const artistId = await getArtistID(artistName, country);
+        const lookupUrl = `https://itunes.apple.com/lookup?id=${artistId}&entity=album&country=${country}`;
+        const response = await fetch(lookupUrl);
+        if (!response.ok) {
+          throw new Error('Failed to fetch albums from iTunes API.');
+        }
+        const data = await response.json();
+        const albums = data.results.filter(album =>
+          album.wrapperType === 'collection' &&
+          album.collectionType === 'Album' &&
+          album.artistId.toString() === artistId
+        );
+
+        const songsLinks = [];
+        const albumPromises = albums.map(async (album) => {
+          updateStatus(`Processing album: ${album.collectionName}`);
+          const albumUrl = `https://itunes.apple.com/lookup?id=${album.collectionId}&entity=song&country=${country}`;
+          const albumResponse = await fetch(albumUrl);
+          if (!albumResponse.ok) {
+            console.warn(`Failed to fetch songs for album: ${album.collectionName}`);
+            return [];
+          }
+          const albumData = await albumResponse.json();
+          return albumData.results.filter(song =>
+            song.wrapperType === 'track' &&
+            song.kind === 'song' &&
+            song.trackViewUrl
+          ).map(song => song.trackViewUrl);
+        });
+
+        const songsArrays = await Promise.all(albumPromises);
+        songsArrays.forEach(songs => songsLinks.push(...songs));
+
+        if (songsLinks.length === 0) {
+          throw new Error('No songs found for this artist.');
+        }
+
+        // Cache the songs list
+        localStorage.setItem(cacheKey, JSON.stringify(songsLinks));
+        updateStatus('Songs fetched and cached.');
+        return songsLinks;
+      }
+
+      // Function to convert Apple Music link to target platform using Song.link API
+      async function convertLink(appleMusicLink, platform, country) {
+        if (platform.toLowerCase() === 'applemusic') {
+          return appleMusicLink;
+        }
+      
+        const corsProxy = 'https://corsproxy.io/?';
+        const encodedUrl = encodeURIComponent(appleMusicLink);
+        const apiUrl = `https://api.song.link/v1-alpha.1/links?url=${encodedUrl}&userCountry=${country}&songIfSingle=true`;
+      
+        updateStatus('Converting link to target platform...');
+        const response = await fetch(corsProxy + apiUrl);
+      
+        if (!response.ok) {
+          throw new Error('Failed to convert link using Song.link API.');
+        }
+      
+        const data = await response.json();
+        const platformData = data.linksByPlatform[platform.toLowerCase()];
+      
+        if (!platformData || !platformData.url) {
+          throw new Error(`Platform "${platform}" not found or not supported.`);
+        }
+      
+        let platformLink = platformData.url;
+        // Remove angle brackets if present
+        if (platformLink.startsWith('<') && platformLink.endsWith('>')) {
+          platformLink = platformLink.slice(1, -1);
+        }
+      
+        return platformLink;
+      }
+
+      // Main Execution Flow
+      try {
+        const { artist, country, platform } = getQueryParams();
+
+        if (!artist || !country || !platform) {
+          updateStatus('Missing query parameters. Please provide artist, country, and platform.');
+          return;
+        }
+
+        updateStatus('Fetching songs list...');
+        const songsLinks = await getSongsList(artist, country);
+
+        // Select a random song
+        const randomIndex = Math.floor(Math.random() * songsLinks.length);
+        const randomSongLink = songsLinks[randomIndex];
+        updateStatus('Selected a random song.');
+
+        // Convert the link to the target platform
+        const convertedLink = await convertLink(randomSongLink, platform, country);
+
+        updateStatus('Redirecting to the song...');
+      
+        window.location.href = convertedLink;
+      } catch (error) {
+        console.error(error);
+        updateStatus(`Error: ${error.message}`);
+      }
+    })();
+  </script>
+</body>
+</html>
